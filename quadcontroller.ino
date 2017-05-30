@@ -8,10 +8,16 @@
 MPU6050 mpu;
 
 
+//Quad constants
+
+int m = 0.4;                               //mass in gramms
+int c_f =  0;                               //force constant in N/(pulse length)
+int c_t =  0;                               //torque constant in Nm/(pulse length)
+int c_acc = 0;                              //acceleration constant (multiply with mpu signal)
 
 
-///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
-//PID gain and limit settings
+//////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+//PID angle gain and limit settings
 ///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 float pid_p_gain_roll = 0.4;               //Gain setting for the roll P-controller (1.3)
 float pid_i_gain_roll = 0.05;              //Gain setting for the roll I-controller (0.05)
@@ -31,7 +37,7 @@ int pid_max_yaw = 400;                     //Maximum output of the PID-controlle
 float pid_error_temp;
 float pid_i_mem_roll, pid_roll_setpoint, pid_output_roll, pid_last_roll_d_error;
 float pid_i_mem_pitch, pid_pitch_setpoint, pid_output_pitch, pid_last_pitch_d_error;
-float pid_i_mem_yaw, pid_yaw_setpoint, pid_output_yaw, pid_last_yaw_d_error;
+float pid_i_mem_yaw, pid_yaw_setpoint, pid_output_yaw, pid_last_yaw_d_error, yaw_vel;
 
 
 // start
@@ -39,8 +45,10 @@ int start = 0;
 
 // timing
 long int loop_timer;
+long int loop_length = 4000;
 volatile int ISR_timer;
 volatile int channel_timer[4];
+
 volatile bool channelbit[4];
 long int ESC_timer[4];
 long int ESC_loop_timer;
@@ -50,7 +58,7 @@ long int ESC_loop_timer;
 volatile int channel_in[4];
 int motor_in[4];
 bool motor_flag[4] = {0, 0, 0, 0};
-int controller_out[1] = {0};
+
 
 
 
@@ -63,6 +71,9 @@ uint16_t fifoCount;     // count of all bytes currently in FIFO
 uint8_t fifoBuffer[64]; // FIFO storage buffer
 
 // orientation/motion vars
+
+int16_t ax, ay, az;
+int16_t gx, gy, gz;
 Quaternion q;           // [w, x, y, z]         quaternion container
 VectorInt16 aa;         // [x, y, z]            accel sensor measurements
 VectorInt16 aaReal;     // [x, y, z]            gravity-free accel sensor measurements
@@ -152,21 +163,26 @@ void loop() {
    if (start == 2 && channel_in[2] <= 1050 && channel_in[3] >= 1050) start = 0;
   
    if (start == 2){
-      
      //The PID set point in degrees per second is determined by the roll receiver input.
      //In the case of deviding by 3 the max roll rate is aprox 164 degrees per second ( (500-8)/3 = 164d/s ).
      pid_roll_setpoint = 0;
      //We need a little dead band of 16us for better results.
      if(channel_in[1] > 1508)pid_roll_setpoint = (channel_in[1] - 1508)/6.0;
      else if(channel_in[1] < 1492)pid_roll_setpoint = (channel_in[1] - 1492)/6.0;
+     else if(channel_in[1] > 1492 && channel_in[1] < 1508) {
+       pid_roll_setpoint = asin((cos(ypr[1])/(m * c_acc * aaWorld.y))*(c_f *(motor_in[0] + motor_in[1] + motor_in[2] + motor_in[3])));
+     }
   
      //The PID set point in degrees per second is determined by the pitch receiver input.
      //In the case of deviding by 3 the max pitch rate is aprox 164 degrees per second ( (500-8)/3 = 164d/s ).
      pid_pitch_setpoint = 0;
      //We need a little dead band of 16us for better results.
-     if(channel_in[0] > 1508)pid_pitch_setpoint = (channel_in[0] - 1508)/6.0;
-     else if(channel_in[0] < 1492)pid_pitch_setpoint = (channel_in[0] - 1492)/6.0;
-    
+     if(channel_in[0] > 1508)pid_pitch_setpoint = (channel_in[0] - 1508)/2.0;
+     else if(channel_in[0] < 1492)pid_pitch_setpoint = (channel_in[0] - 1492)/2.0;
+     else if(channel_in[0] > 1492 && channel_in[0] < 1508) {
+       pid_pitch_setpoint = -asin((cos(ypr[2])/(m * c_acc * aaWorld.x))*(c_f *(motor_in[0] + motor_in[1] + motor_in[2] + motor_in[3])));
+     }
+
      //The PID set point in degrees per second is determined by the yaw receiver input.
      //In the case of deviding by 3 the max yaw rate is aprox 164 degrees per second ( (500-8)/3 = 164d/s ). 
      pid_yaw_setpoint = 0;
@@ -175,49 +191,50 @@ void loop() {
        if(channel_in[3] > 1508)pid_yaw_setpoint = (channel_in[3] - 1508)/6.0;
        else if(channel_in[3] < 1492)pid_yaw_setpoint = (channel_in[3] - 1492)/6.0;
      }
-
-        calculations();
-        receiver_Data();
-        
-        motor_in[0] = channel_in[2] + pid_output_pitch + pid_output_roll - pid_yaw_setpoint;
-        motor_in[1] = channel_in[2] - pid_output_pitch + pid_output_roll + pid_yaw_setpoint;
-        motor_in[2] = channel_in[2] - pid_output_pitch - pid_output_roll - pid_yaw_setpoint;
-        motor_in[3] = channel_in[2] + pid_output_pitch - pid_output_roll + pid_yaw_setpoint;
+     
+     
+     calculations();
+           
+     motor_in[0] = channel_in[2] + pid_output_pitch + pid_output_roll - pid_yaw_setpoint;
+     motor_in[1] = channel_in[2] - pid_output_pitch + pid_output_roll + pid_yaw_setpoint;
+     motor_in[2] = channel_in[2] - pid_output_pitch - pid_output_roll - pid_yaw_setpoint;
+     motor_in[3] = channel_in[2] + pid_output_pitch - pid_output_roll + pid_yaw_setpoint;
  
-        if (motor_in[0] < 1000) motor_in[0] = 1000;
-        if (motor_in[1] < 1000) motor_in[1] = 1000;
-        if (motor_in[2] < 1000) motor_in[2] = 1000;
-        if (motor_in[3] < 1000) motor_in[3] = 1000;
+     if (motor_in[0] < 1000) motor_in[0] = 1000;
+     if (motor_in[1] < 1000) motor_in[1] = 1000;
+     if (motor_in[2] < 1000) motor_in[2] = 1000;
+     if (motor_in[3] < 1000) motor_in[3] = 1000;
 
-        if (motor_in[0] > 2000) motor_in[0] = 2000;
-        if (motor_in[1] > 2000) motor_in[1] = 2000;
-        if (motor_in[2] > 2000) motor_in[2] = 2000;
-        if (motor_in[3] > 2000) motor_in[3] = 2000;
+     if (motor_in[0] > 2000) motor_in[0] = 2000;
+     if (motor_in[1] > 2000) motor_in[1] = 2000;
+     if (motor_in[2] > 2000) motor_in[2] = 2000;
+     if (motor_in[3] > 2000) motor_in[3] = 2000;
 
-        if (channel_in[2] <= 1050){
-          motor_in[0] = 1000;
-          motor_in[1] = 1000;
-          motor_in[2] = 1000;
-          motor_in[3] = 1000;
-        }
+     if (channel_in[2] <= 1050){
+       motor_in[0] = 1000;
+       motor_in[1] = 1000;
+       motor_in[2] = 1000;
+       motor_in[3] = 1000;
+     }
               
-        while (micros() - loop_timer <= 4000);
-        loop_timer = micros();
+     while (micros() - loop_timer <= 4000);
+     loop_length = micros - loop_timer;
+     loop_timer = micros();
 
-        PORTD |= B11110000;
-        ESC_timer[0] = motor_in[0] + loop_timer;
-        ESC_timer[1] = motor_in[1] + loop_timer;
-        ESC_timer[2] = motor_in[2] + loop_timer;
-        ESC_timer[3] = motor_in[3] + loop_timer;
+     PORTD |= B11110000;
+     ESC_timer[0] = motor_in[0] + loop_timer;
+     ESC_timer[1] = motor_in[1] + loop_timer;
+     ESC_timer[2] = motor_in[2] + loop_timer;
+     ESC_timer[3] = motor_in[3] + loop_timer;
 
-        while (PORTD >=16){
-          ESC_loop_timer = micros();
-          if (ESC_loop_timer >= ESC_timer[0])  PORTD &= B11101111;
-          if (ESC_loop_timer >= ESC_timer[1])  PORTD &= B11011111;
-          if (ESC_loop_timer >= ESC_timer[2])  PORTD &= B10111111;
-          if (ESC_loop_timer >= ESC_timer[3])  PORTD &= B01111111;
-        }   
-   }   
+     while (PORTD >=16){
+       ESC_loop_timer = micros();
+       if (ESC_loop_timer >= ESC_timer[0])  PORTD &= B11101111;
+       if (ESC_loop_timer >= ESC_timer[1])  PORTD &= B11011111;
+       if (ESC_loop_timer >= ESC_timer[2])  PORTD &= B10111111;
+       if (ESC_loop_timer >= ESC_timer[3])  PORTD &= B01111111;
+     }   
+   }    
    mpuInterrupt = false;
    mpuIntStatus = mpu.getIntStatus();
 
@@ -238,6 +255,7 @@ void loop() {
       mpu.dmpGetAccel(&aa, fifoBuffer);
       mpu.dmpGetLinearAccel(&aaReal, &aa, &gravity);
       mpu.dmpGetLinearAccelInWorld(&aaWorld, &aaReal, &q);                                                   
+      mpu.getMotion6(&ax, &ay, &az, &gx, &gy, &gz);
    }
 
  }
@@ -298,7 +316,7 @@ ISR(PCINT0_vect){
 void calculations() {
     //Roll calculations
   pid_error_temp = ypr[2]*180 - pid_roll_setpoint;
- // pid_i_mem_roll += pid_i_gain_roll * pid_error_temp;
+  pid_i_mem_roll += pid_i_gain_roll * pid_error_temp;
   if(pid_i_mem_roll > pid_max_roll)pid_i_mem_roll = pid_max_roll;
   else if(pid_i_mem_roll < pid_max_roll * -1)pid_i_mem_roll = pid_max_roll * -1;
   
@@ -310,7 +328,7 @@ void calculations() {
   
   //Pitch calculations
   pid_error_temp = ypr[1]*180 - pid_pitch_setpoint;
- // pid_i_mem_pitch += pid_i_gain_pitch * pid_error_temp;
+  pid_i_mem_pitch += pid_i_gain_pitch * pid_error_temp;
   if(pid_i_mem_pitch > pid_max_pitch)pid_i_mem_pitch = pid_max_pitch;
   else if(pid_i_mem_pitch < pid_max_pitch * -1)pid_i_mem_pitch = pid_max_pitch * -1;
   
@@ -320,9 +338,10 @@ void calculations() {
     
   pid_last_pitch_d_error = pid_error_temp;
     
-  /*//Yaw calculations
-  pid_error_temp = ypr[0]*180 - pid_yaw_setpoint;
-  //pid_i_mem_yaw += pid_i_gain_yaw * pid_error_temp;
+  //Yaw calculations
+  yaw_vel = gz*cos(ypr[1])*cos(ypr[2]) + gx*sin(ypr[1]) + gy*sin(ypr[2]);
+  pid_error_temp = yaw_vel - pid_yaw_setpoint;
+  pid_i_mem_yaw += pid_i_gain_yaw * pid_error_temp;
   if(pid_i_mem_yaw > pid_max_yaw)pid_i_mem_yaw = pid_max_yaw;
   else if(pid_i_mem_yaw < pid_max_yaw * -1)pid_i_mem_yaw = pid_max_yaw * -1;
   
@@ -330,9 +349,6 @@ void calculations() {
   if(pid_output_yaw > pid_max_yaw)pid_output_yaw = pid_max_yaw;
   else if(pid_output_yaw < pid_max_yaw * -1)pid_output_yaw = pid_max_yaw * -1;
     
-  pid_last_yaw_d_error = pid_error_temp;*/
-}
-///////////////////////////////////////////////////////
-void receiver_Data(){  
+  pid_last_yaw_d_error = pid_error_temp;
 }
 
